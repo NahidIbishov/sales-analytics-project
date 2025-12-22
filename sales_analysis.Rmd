@@ -1,0 +1,410 @@
+---
+title: "Sales Anlysis: Dynamics, Top-products and Forecast"
+author: "Nahid Ibishov"
+date: "2025-12-15"
+output:
+  html_document:
+    css: style.css
+    toc: true
+    toc_float: true
+    self_contained: false 
+---
+
+```{r libraries, include=TRUE, warning=FALSE, error=FALSE, message=FALSE, comment= FALSE}
+
+library(tidyverse)
+library(lubridate)
+library(janitor)
+library(skimr)
+library(corrplot)
+library(gt)
+library(gtsummary)
+library(scales)
+library(patchwork)
+library(ggthemes)
+library(ggplot2)
+library(RColorBrewer)
+library(plotly)
+library(leaflet)
+library(tidygeocoder)
+library(htmlwidgets)
+library(flexdashboard)
+library(shiny)
+library(DT)
+library(summarytools)
+library(arules)
+library(arulesViz)
+library(prophet)
+library(forecast)
+library(scales)
+library(data.table)
+library(rfm)
+
+```
+
+
+# Introduction
+
+This report analyzes sales data from a technology retail store for the period 2019–2020.
+
+**Objectives:**
+
+- Analyze monthly sales trends.
+- Identify top-performing products and regions.
+- Conduct ABC analysis, RFM analysis, and market basket analysis.
+- Build a 3 month sales forecast.
+
+**Data:**
+
+The analysis is based on a csv file containing sales records (order_id, products, addresses, etc.).
+The data source is a local file, with approximately 186,000 rows.
+
+# 1.Data Preparation
+
+## 1.1 Data import
+
+```{r import, include=TRUE, warning=FALSE, error=FALSE,message=FALSE}
+
+data = read.csv("C:/Users/ibish/Desktop/data/Sales Data.csv")
+names(data)
+head(data)
+tail(data)
+skim(data)
+
+```
+
+**Commentary:**
+
+Some auxiliary columns are missing, and there are duplicate order_id values. The first column (X) represents row numbers from the original file and will be removed. The order_date column needs to be converted to the POSIXct format.
+
+
+## 1.2 Cleaning
+
+```{r cleaning, include=TRUE, warning=FALSE, error=FALSE,message=FALSE}
+
+data$X=NULL
+data = clean_names(data)
+data$order_date = dmy_hm(data$order_date)
+data = data.table(data)
+
+data[, state := sub("^[^,]*,([^,]*),.*$","\\1",purchase_address)] # State extraction
+data[, sales := as.double(quantity_ordered * price_each)]
+data[, clean_date := as.Date(order_date)]
+
+``` 
+
+**Commentary:**
+
+All column names were converted to **snake_case**. The **order_date** format was updated.State names were extracted from the full address.Total sales was calculated.
+
+
+
+# 2. Exploratory Data Analysis (EDA)
+
+## 2.1 Monthly Sales Trend
+
+```{r graph1, error=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+
+n1 = data %>% 
+  group_by(month = as.Date(order_date)) %>%
+  summarise(tot_sales=sum(sales))
+
+n1 = data %>% 
+  # Используем floor_date, чтобы превратить "2019-01-15" в "2019-01-01"
+  group_by(month = floor_date(as.Date(order_date), "month")) %>%
+  summarise(tot_sales = sum(sales))
+
+
+ggplotly(ggplot(n1, aes(x = month, y = tot_sales)) + 
+  geom_line(color = "darkblue", size = 1) + 
+  geom_point(color = "darkblue") + 
+  scale_x_date(
+    breaks = "1 month",                
+    labels = label_date_short(),       
+    expand = c(0.05, 0.05)) + 
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale())) + 
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(title = "Total sales by Month", x = "Month", y = "Total Sales"))
+
+
+
+```
+
+**Commentary:**
+
+From a business analysis perspective, the line chart indicates a clear sales peak in December 2019 driven by seasonal holiday demand. A noticeable increase in sales is also observed in September 2019 compared to the previous month, which can be attributed to the start of the academic season, changes in consumer behavior after the summer, and promotional campaigns by retail chains. The lower value observed in January 2020 is not indicative of a decline in performance and is explained by the fact that the data covers only the first day of the month. Therefore, this observation does not represent a data anomaly but rather a limitation of the reporting period.
+
+
+
+## 2.2 Top 10 Products by Revenue
+
+```{r graph2, include=TRUE, warning=FALSE, error=FALSE,message=FALSE}
+
+n2 = data %>% group_by(product) %>% summarise(tot_sales = sum(sales),qnt = sum(quantity_ordered))
+n2 = n2 %>% slice_max(tot_sales,n = 10) 
+
+ggplotly(ggplot(n2, aes(reorder(product, tot_sales), tot_sales, fill = tot_sales)) + 
+  geom_col() + coord_flip() + scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale())) +
+  theme_minimal() + theme(legend.position = "none") + labs(title = "Top 10 Products by Sales", x = "Product", y = "Total Sales"))  
+
+```
+
+**Commentary:**
+
+Apple products dominate the top-10 list (with Bose as a subsidiary brand). Monitors are also among the most popular items. **Recommendation:** focus on these segments by strengthening promotions and ensuring sufficient stock levels.
+
+
+## 2.3 Sales by states (map)
+
+```{r map, include=TRUE, warning=FALSE, error=FALSE,message=FALSE}
+
+state_sales = data %>%
+  group_by(state) %>%
+  summarise(tot_sales = sum(sales))
+
+state_sales = state_sales %>% geocode(state, method = "osm")
+state_sales = data.table(state_sales)
+state_sales[, share := percent(round(tot_sales/sum(tot_sales),3))] 
+
+popup_text = paste0("<b>", state_sales$state,"</b><br>",
+                    "Total Sales: ", format(state_sales$tot_sales, big.mark = " "),"<br>",
+                    "Share of total: ", state_sales$share)
+  
+  
+leaflet(state_sales) %>% addTiles() %>% addCircles(lng = ~long, lat = ~lat, weight = ~tot_sales/1e5, popup = ~popup_text)
+
+```
+
+**Commentary:**
+
+Sales are highly concentrated in **San Francisco**, **Los Angeles**, and **New York**, indicating strong market penetration in these cities. At the same time, other regions underperform. 
+
+**Recommendation:** deploy targeted promotional and marketing initiatives in weaker regions to stimulate demand and reduce dependency on a small number of key markets.
+
+# 3. Advanced Analytics: Customer Value & Purchasing Patterns
+
+## 3.1 ABC Analysis of Products
+
+```{r ABC, include=TRUE, warning=FALSE, error=FALSE,message=FALSE}
+
+abc = data %>%
+  group_by(product) %>%
+  summarise(tot_sales = sum(sales)) %>%
+  arrange(desc(tot_sales))
+
+
+abc = abc %>%
+  mutate(
+    share = tot_sales / sum(tot_sales),  # Individual share
+    cum_share = cumsum(share),           # Cumulative share 
+    abc_class = case_when(
+      cum_share < 0.8 ~ "A",
+      cum_share < 0.95 ~ "B",
+      TRUE ~ "C"))
+
+
+
+abc$product <- factor(abc$product, levels = abc$product)
+
+
+ggplot(abc, aes(x = product)) +
+  geom_col(aes(y = tot_sales), fill = "steelblue") +  # один цвет для всех столбцов
+  geom_line(aes(y = cum_share * max(tot_sales), group = 1), color = "red", size = 1) +
+  geom_point(aes(y = cum_share * max(tot_sales)), color = "red", size = 2) +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale()),
+    name = "Total Sales",
+    sec.axis = sec_axis(~./max(abc$tot_sales), name = "Cumulative Share", labels = percent)
+  ) +
+  labs(x = "Product") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+**Commentary:**
+
+The Pareto chart shows that a relatively small group of products accounts for the majority of total sales. The cumulative curve rises quickly, indicating that top-performing items contribute a disproportionate share of revenue, while the remaining products add value more gradually.
+
+Most of the total sales volume is generated before reaching the 80% cumulative threshold, which confirms a strong concentration of revenue around key products. Beyond this point, additional products contribute marginally, suggesting diminishing returns from the long tail of the assortment.
+
+From a business perspective, this implies that sales performance is heavily driven by a limited number of high-impact products. Focusing inventory management, pricing, and promotional efforts on these core items is likely to yield the greatest return, while lower-contributing products should be reviewed for optimization, bundling, or rationalization.
+
+## 3.2 RFM Analysis
+
+```{r RFM, include=TRUE, warning=FALSE, error=FALSE,message=FALSE}
+
+data[, clean_date := as.Date(order_date)]
+
+analysis_date = as.Date("2020-01-02")
+
+rfm = data %>% group_by(purchase_address) %>% summarise(sales, order_date, recency = as.numeric(analysis_date - max(clean_date)),
+frequency = n(),
+monetary = sum(sales))
+
+rfm = data.table(rfm)
+
+rfm[, `:=`(
+  r_score = ntile(-recency, 5), 
+  f_score = ntile(frequency, 5),
+  m_score = ntile(monetary, 5)
+  )]
+  
+rfm[, rfm_score := paste0(r_score, f_score, m_score)]
+
+rfm[, segment := fcase(
+  r_score >= 4 & f_score >= 4 & m_score >= 4,
+  "Champions",
+  r_score >= 3 & f_score >= 4,
+  "Loyal",
+  m_score >= 4 & f_score <= 3,
+  "High Value",
+  r_score >= 4 & f_score <= 3,
+  "New / Promising",
+  r_score <= 2 & f_score >= 3,
+  "At Risk",
+  r_score <= 2 & f_score <= 2,
+  "Lost",
+  default = "Others"
+)]
+
+
+rfm_tab1 = rfm %>% group_by(purchase_address) %>% summarise(purchase_address,rfm_score,segment) 
+
+datatable(rfm_tab1,
+          extensions = 'Buttons',
+           options = list(paging = TRUE,
+                          searching = TRUE,
+                          fixedColumns = TRUE,
+                          autoWidth = TRUE,
+                          ordering = TRUE,
+                          dom = 'Bftp',
+                          buttons = c('copy', 'csv', 'excel','print')
+                            ))
+
+rfm_tab2 = rfm %>% group_by(segment) %>% summarise(tot_sales = sum(sales))
+
+rfm_tab2 =  rfm_tab2 %>% mutate(share = round((tot_sales/sum(tot_sales)) * 100,2))
+
+
+ggplot(rfm_tab2, aes(x = reorder(segment,tot_sales), y = tot_sales)) + geom_col(fill = "steelblue", color = "black") + coord_flip() + scale_y_continuous(labels = label_number(scale_cut = cut_short_scale())) + labs(title = "Total Sales by Customer Segment", x = "Segments", y = "Total Sales") + geom_text(aes(label = paste0(rfm_tab2$share,"%")))
+
+
+```
+
+**Segment Interpretations:**
+
+!!! RFM segmentation was performed using order addresses as a proxy for unique customers. Therefore, the analysis reflects order-based activity rather than individual customer behavior !!!
+
+*At Risk:*
+Inactive but previously engaged order addresses.
+Focus: reactivation campaigns, special offers, win-back strategies.
+
+*Champions:*
+Top order addresses with the highest engagement and revenue.
+Focus: retention, VIP programs, personalized experiences.
+
+*High Value:*
+Order addresses generating significant revenue, though not necessarily frequent.
+Focus: upsell, cross-sell, exclusive offers.
+
+*Lost:*
+Inactive and low-value order addresses.
+Focus: reactivation campaigns or exclusion from targeting.
+
+*Loyal:*
+Consistently frequent and reliable order addresses.
+Focus: loyalty programs, rewards, long-term engagement.
+
+*New/Promising:*
+Recent order addresses showing potential for growth.
+Focus: onboarding, nurturing, early engagement campaigns.
+
+*Others:*
+Order addresses that do not fit other segments.
+Focus: general communication, broad marketing campaigns.
+
+
+## 3.3 Market Basket Analysis 
+
+```{r market basket, include=TRUE, warning=FALSE, error=FALSE,message=FALSE}
+
+basket = data %>% group_by(order_id) %>% summarise(items = list(product))  
+
+basket = basket %>% pull(items)
+
+trans = as(basket, "transactions")
+
+#1. rules = apriori(trans, parameter = list(supp = 0.001, conf = 0.5, maxlen = 3)) "no rules"
+
+#2. rules = apriori(trans, parameter = list(supp = 0.0001, conf = 0.5, maxlen = 3)) "no rules"
+
+rules = apriori(trans, parameter = list(supp = 0.00005, conf = 0.3, maxlen = 3))
+
+inspect(head(sort(rules, by = "lift", decreasing = TRUE),20))
+
+plot(rules, method = "graph", engine = "htmlwidget")
+
+```
+
+**Commentary:**
+
+*Apple ecosystem cluster:*
+
+iPhone strongly linked to Airpods Headphones and Lightning Charging Cable, indicating phone buyers often add wireless earbuds and compatible chargers. Bose SoundSport Headphones ties to Lightning Cable, suggesting accessory pairing for Apple users.
+
+*Google/Android ecosystem cluster:*
+
+Google Phone connected to USB-C Charging Cable and Wired Headphones, showing phone purchases drive charger and basic audio add-ons.
+
+*Cross-links:*
+
+Wired Headphones bridges to Lightning Cable, possibly due to adapter needs for older iPhones or mixed-device baskets. Note Rule 3 unusually links USB-C to iPhone, which may reflect post-2023 data (iPhone 15+ switched to USB-C) or data anomalies.
+
+# 4. Sales prediction
+
+```{r prediction, include=TRUE, warning=FALSE, error=FALSE,message=FALSE}
+
+date_sales = data %>% group_by(ds = clean_date) %>% summarise(y = sum(sales))
+
+date_sales = data.table(date_sales)
+
+date_sales = date_sales[ds < as.Date("2020-01-01")]
+
+holidays = data.table(holiday = c("New Year","Christmas","Thanksgiving","Black Friday"), 
+                      ds = as.Date(c("2019-01-01", "2019-12-25", "2019-11-28", "2019-11-29",  # Dates for 2019
+                 "2020-01-01", "2020-12-25", "2020-11-26", "2020-11-27",  # Dates for 2020
+                 "2021-01-01", "2021-12-25", "2021-11-25", "2021-11-26")),
+  lower_window = -1,  # Day before holiday
+  upper_window = 1    # Day after 
+)
+ 
+m = prophet(date_sales, holidays = holidays, yearly.seasonality = TRUE, weekly.seasonality = TRUE)
+
+future = make_future_dataframe(m, periods = 90 )
+forecast = predict(m, future)
+
+cv = cross_validation(m, initial = 180, period = 30, horizon = 90, units = "days")
+metrics = performance_metrics(cv)
+
+ggplotly(plot(m, forecast) + 
+  add_changepoints_to_plot(m) + scale_y_continuous(labels = label_number(scale_cut = cut_short_scale())) + labs(title = "Sales Forecast for the Next 3 Months", x = "Total Sales", y = "Date"))
+
+
+```
+
+**Commentary:**
+
+Despite minor fluctuations, sales show a consistent upward trend and predictable demand patterns. The forecast projects continued growth above historical averages, supporting a positive and stable outlook for short-term business planning.
+
+
+# Conclusion
+
+**Recommendations:** 
+
+To maximize growth and operational stability, the company should transition to a retention-first strategy while optimizing its product mix and regional presence. By focusing marketing and inventory efforts on the A-class segment (specifically Apple smartphones, TVs, and monitors) and leveraging smart bundling—such as pairing Google phones with USB-C cables and iPhones with AirPods—the business can significantly increase average order value and protect its primary revenue streams. Strategically, the focus must shift from broad acquisition to increasing the Lifetime Value (LTV) of "Champions" and "High Value" customers through personalized loyalty incentives, while deploying targeted re-engagement campaigns for "At Risk" segments to prevent churn.
+
+Operationally, the company must address its high geographical dependency on San Francisco, Los Angeles, and New York by launching aggressive promotional initiatives in underperforming regions to diversify its market footprint. With sales forecasted to reach a record 160k–180k units during the December peak, immediate action is required to scale logistics, increase staffing, and secure additional working capital. Maintaining a financial buffer is essential to mitigate the uncertainty at the end of the trend, ensuring the company remains resilient even if sales hit the lower bound of the projections.
+
+
